@@ -1,0 +1,45 @@
+{
+  "name": "chosen-time-tables",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Chosen Time Tables — School timetable management & generation for Kenyan schools (CBC)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "functions:build": "cd functions && npm run build",
+    "functions:serve": "cd functions && npm run serve"
+  },
+  "dependencies": {
+    "firebase": "^11.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
+    "zustand": "^5.0.0",
+    "date-fns": "^4.1.0",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.5.0",
+    "lucide-react": "^0.460.0",
+    "zod": "^3.23.0",
+    "sonner": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.0",
+    "autoprefixer": "^10.4.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

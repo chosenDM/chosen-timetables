@@ -1,0 +1,253 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSchoolMember(schoolId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.active == true;
+    }
+
+    function schoolRole(schoolId) {
+      return get(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.role;
+    }
+
+    function isPrincipalOrAdmin(schoolId) {
+      return isSchoolMember(schoolId)
+        && schoolRole(schoolId) in ['principal', 'timetable_admin'];
+    }
+
+    function isHOD(schoolId) {
+      return isSchoolMember(schoolId) && schoolRole(schoolId) == 'hod';
+    }
+
+    function schoolIsActive(schoolId) {
+      return exists(/databases/$(database)/documents/schools/$(schoolId))
+        && get(/databases/$(database)/documents/schools/$(schoolId)).data.accountStatus == 'active';
+    }
+
+    // Bootstrap: creator writing their own principal membership during school creation
+    function isCreatingOwnPrincipalMembership(schoolId, userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == 'principal'
+        && request.resource.data.active == true
+        && request.resource.data.schoolId == schoolId;
+    }
+
+    // Billing / trial / subscription fields — client must NEVER change these
+    function protectedSchoolKeys() {
+      return [
+        'plan',
+        'paymentStatus',
+        'accountStatus',
+        'suspensionReason',
+        'trialStart',
+        'trialEnd',
+        'trialPdfDownloadCount',
+        'trialPdfClassIds',
+        'trialPdfLastClassId',
+        'trialPdfLastClassName',
+        'trialPdfLastAt',
+        'subscriptionStartsAt',
+        'subscriptionExpiresAt',
+        'subscriptionRenewsAt',
+        'lifetimePurchasedAt',
+        'lastManualGrantAt',
+        'lastManualGrantBy',
+        'createdByUid',
+        'createdAt'
+      ];
+    }
+
+    function clientSchoolUpdateSafe() {
+      // Diff keys must not include protected billing/trial fields
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(protectedSchoolKeys());
+    }
+
+    function schoolCreateValid() {
+      return request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.plan == 'trial'
+        && request.resource.data.accountStatus == 'active'
+        && request.resource.data.paymentStatus in ['none', 'trial']
+        && request.resource.data.keys().hasAll(['name', 'createdByUid', 'plan', 'accountStatus']);
+    }
+
+    // ── User profiles (top-level) ───────────────────────────────────────────
+    match /userProfiles/{uid} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == uid
+        || (resource != null && resource.data.keys().hasAny(['schoolId'])
+            && isPrincipalOrAdmin(resource.data.schoolId))
+      );
+      allow create: if isSignedIn() && (
+        request.auth.uid == uid
+        || (
+          request.resource.data.keys().hasAll(['schoolId', 'role', 'email'])
+          && isPrincipalOrAdmin(request.resource.data.schoolId)
+        )
+      );
+      allow update: if isSignedIn() && (
+        request.auth.uid == uid
+        || (
+          request.resource.data.keys().hasAny(['schoolId'])
+          && isPrincipalOrAdmin(request.resource.data.schoolId)
+        )
+      );
+      // Prevent privilege escalation: non-self cannot set arbitrary role without being principal
+      allow delete: if false;
+    }
+
+    // ── Schools ─────────────────────────────────────────────────────────────
+    match /schools/{schoolId} {
+      // Members always; creator can read own school before membership settles
+      allow read: if isSchoolMember(schoolId)
+                  || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
+
+      // New schools: trial only; must stamp creator UID
+      allow create: if isSignedIn() && schoolCreateValid();
+
+      // Profile fields only — plan / payment / trial counters are Functions-only
+      allow update: if isPrincipalOrAdmin(schoolId)
+                    && schoolIsActive(schoolId)
+                    && clientSchoolUpdateSafe();
+
+      allow delete: if false;
+
+      // Membership
+      match /users/{userId} {
+        allow read: if isSchoolMember(schoolId) || (isSignedIn() && request.auth.uid == userId);
+        allow create: if (isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId))
+                      || isCreatingOwnPrincipalMembership(schoolId, userId);
+        allow update: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+        allow delete: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Schedule / settings (bootstrap create allowed for signed-in creator)
+      match /settings/{id} {
+        allow read: if isSchoolMember(schoolId)
+                    || (isSignedIn()
+                        && exists(/databases/$(database)/documents/schools/$(schoolId))
+                        && get(/databases/$(database)/documents/schools/$(schoolId)).data.createdByUid == request.auth.uid);
+        allow create: if isSignedIn()
+                      && (
+                        isPrincipalOrAdmin(schoolId)
+                        || (
+                          exists(/databases/$(database)/documents/schools/$(schoolId))
+                          && get(/databases/$(database)/documents/schools/$(schoolId)).data.createdByUid == request.auth.uid
+                        )
+                      );
+        allow update: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+        allow delete: if false;
+      }
+
+      match /departments/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /teachers/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /classes/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /learningAreas/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /periods/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /allocations/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow create: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+        allow update: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+        allow delete: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /availability/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+      }
+
+      match /timetables/{timetableId} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+
+        match /entries/{entryId} {
+          allow read: if isSchoolMember(schoolId);
+          allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+        }
+      }
+
+      match /timetableVersions/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /examTimetables/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /remedialTimetables/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /remedialWeeks/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /electiveSessions/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /jointClasses/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /auditLogs/{id} {
+        allow read: if isPrincipalOrAdmin(schoolId);
+        allow create: if isSchoolMember(schoolId);
+        allow update, delete: if false;
+      }
+
+      // Payments & subscription history — Functions only
+      match /payments/{id} {
+        allow read: if isPrincipalOrAdmin(schoolId);
+        allow write: if false;
+      }
+
+      match /subscriptionHistory/{id} {
+        allow read: if isPrincipalOrAdmin(schoolId);
+        allow write: if false;
+      }
+    }
+
+    // Platform — Admin SDK / Cloud Functions only
+    match /platform/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

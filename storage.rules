@@ -1,0 +1,33 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSchoolMember(schoolId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/schools/$(schoolId)/users/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.active == true;
+    }
+
+    function isPrincipalOrAdmin(schoolId) {
+      return isSchoolMember(schoolId)
+        && firestore.get(/databases/(default)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.role
+             in ['principal', 'timetable_admin'];
+    }
+
+    // School assets (logos) — members can read; only principal/timetable admin can upload
+    match /schools/{schoolId}/{allPaths=**} {
+      allow read: if isSchoolMember(schoolId);
+      allow write: if isPrincipalOrAdmin(schoolId)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

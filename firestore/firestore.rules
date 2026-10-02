@@ -1,0 +1,181 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSchoolMember(schoolId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.active == true;
+    }
+
+    function schoolRole(schoolId) {
+      return get(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.role;
+    }
+
+    function isPrincipalOrAdmin(schoolId) {
+      return isSchoolMember(schoolId)
+        && schoolRole(schoolId) in ['principal', 'timetable_admin'];
+    }
+
+    function isHOD(schoolId) {
+      return isSchoolMember(schoolId) && schoolRole(schoolId) == 'hod';
+    }
+
+    function schoolIsActive(schoolId) {
+      return exists(/databases/$(database)/documents/schools/$(schoolId))
+        && get(/databases/$(database)/documents/schools/$(schoolId)).data.accountStatus == 'active';
+    }
+
+    // Bootstrap: creator writing their own principal membership during school creation
+    function isCreatingOwnPrincipalMembership(schoolId, userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == 'principal'
+        && request.resource.data.active == true
+        && request.resource.data.schoolId == schoolId;
+    }
+
+    // ── User profiles (top-level) ───────────────────────────────────────────
+    match /userProfiles/{uid} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == uid
+        || (resource != null && resource.data.keys().hasAny(['schoolId'])
+            && isPrincipalOrAdmin(resource.data.schoolId))
+      );
+      // Own profile, OR principal/admin creating a membership profile for their school
+      allow create: if isSignedIn() && (
+        request.auth.uid == uid
+        || (
+          request.resource.data.keys().hasAll(['schoolId', 'role', 'email'])
+          && isPrincipalOrAdmin(request.resource.data.schoolId)
+        )
+      );
+      allow update: if isSignedIn() && (
+        request.auth.uid == uid
+        || (
+          request.resource.data.keys().hasAny(['schoolId'])
+          && isPrincipalOrAdmin(request.resource.data.schoolId)
+        )
+      );
+    }
+
+    // ── Schools ─────────────────────────────────────────────────────────────
+    match /schools/{schoolId} {
+      // Allow any signed-in user to read a school during bootstrap
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+
+      // Membership
+      match /users/{userId} {
+        allow read: if isSchoolMember(schoolId) || (isSignedIn() && request.auth.uid == userId);
+        allow create: if (isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId))
+                      || isCreatingOwnPrincipalMembership(schoolId, userId);
+        allow update: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+        allow delete: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Schedule / settings (created during school bootstrap)
+      match /settings/{id} {
+        allow read: if isSchoolMember(schoolId) || isSignedIn();
+        allow create: if isSignedIn();
+        allow update: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Core school data modules
+      match /departments/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /teachers/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /classes/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /learningAreas/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /periods/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Allocations – HOD can manage, principal/admin can approve
+      match /allocations/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow create: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+        allow update: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+        allow delete: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Availability matrix
+      match /availability/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if (isPrincipalOrAdmin(schoolId) || isHOD(schoolId)) && schoolIsActive(schoolId);
+      }
+
+      // Timetables + entries
+      match /timetables/{timetableId} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+
+        match /entries/{entryId} {
+          allow read: if isSchoolMember(schoolId);
+          allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+        }
+      }
+
+      match /timetableVersions/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Exam & remedial modules
+      match /examTimetables/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      match /remedialTimetables/{id} {
+        allow read: if isSchoolMember(schoolId);
+        allow write: if isPrincipalOrAdmin(schoolId) && schoolIsActive(schoolId);
+      }
+
+      // Audit (append-only for members)
+      match /auditLogs/{id} {
+        allow read: if isPrincipalOrAdmin(schoolId);
+        allow create: if isSchoolMember(schoolId);
+        allow update, delete: if false;
+      }
+
+      // Payments – client can read; writes only via Cloud Functions
+      match /payments/{id} {
+        allow read: if isPrincipalOrAdmin(schoolId);
+        allow write: if false;
+      }
+    }
+
+    // Platform collections – Admin SDK / Cloud Functions only
+    match /platform/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
